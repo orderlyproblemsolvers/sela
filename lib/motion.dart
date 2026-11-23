@@ -138,7 +138,7 @@ class MotionPageTransitionsBuilder extends PageTransitionsBuilder {
 Route<T> fadeRoute<T>(Widget page) => PageRouteBuilder<T>(
       transitionDuration: const Duration(milliseconds: 160),
       reverseTransitionDuration: const Duration(milliseconds: 140),
-      pageBuilder: (_, __, ___) => page,
-      transitionsBuilder: (_, animation, __, child) =>
+      pageBuilder: (_, _, _) => page,
+      transitionsBuilder: (_, animation, _, child) =>
           FadeTransition(opacity: animation, child: child),
     );

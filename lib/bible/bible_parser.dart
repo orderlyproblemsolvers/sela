@@ -9,10 +9,10 @@ int verseKey(int book, int chapter, int verse) =>
 /// Parses a Bible XML file into {verseKey: text}.
 ///
 /// Understands the common layouts:
-///   Zefania : <BIBLEBOOK bnumber bname><CHAPTER cnumber><VERS vnumber>
-///   OSIS    : <div type="book" osisID><chapter osisID><verse osisID>
-///   Generic : <book name|number><chapter number><verse number>
-///             (also the short <b n><c n><v n> form)
+///   Zefania : `<BIBLEBOOK bnumber bname><CHAPTER cnumber><VERS vnumber>`
+///   OSIS    : `<div type="book" osisID><chapter osisID><verse osisID>`
+///   Generic : `<book name|number><chapter number><verse number>`
+///             (also the short `<b n><c n><v n>` form)
 ///
 /// Must be a top-level function so it can run in an isolate via compute().
 Map<int, String> parseBibleXml(String source) {

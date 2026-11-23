@@ -31,6 +31,8 @@ dependencies:
   flutter:
     sdk: flutter
 
+  pdf: ^3.13.1
+
   file_picker: 13.3.0  # Or use the latest version
   path_provider: ^2.1.0
   share_plus: ^13.3.1
@@ -45,13 +47,13 @@ dependencies:
     sdk: flutter
   flutter_staggered_grid_view: ^0.7.0
   animations: ^3.0.0
+  flutter_native_splash: ^2.4.8
+  lucide_icons_flutter: ^4.0.3
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_launcher_icons: ^0.14.4
-  flutter_native_splash: ^2.4.6
-
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
   # activated in the `analysis_options.yaml` file located at the root of your
@@ -102,19 +104,16 @@ flutter:
   #         weight: 700
 
 flutter_native_splash:
-  color: "#ffffff" # Background color
-  image: assets/icon/app_icon.png # Your splash image (PNG)
-  
-  # Optional: Dark mode settings
-  color_dark: "#121212"
-  image_dark: assets/icon/app_icon.png
+  color: "#FAF9F5"
+  image: assets/images/sela_logo.png
+  color_dark: "#262624"
+  image_dark: assets/images/sela_logo.png
 
-  # Android 12+ specific settings
   android_12:
-    image: assets/icon/app_icon.png
-    icon_background_color: "#ffffff"
-    image_dark: assets/icon/app_icon.png
-    icon_background_color_dark: "#121212"
-  #
-  # For details regarding fonts from package dependencies,
-  # see https://flutter.dev/to/font-from-package
+    image: assets/images/sela_logo.png
+    icon_background_color: "#F3DDD2"
+    image_dark: assets/images/sela_logo.png
+    icon_background_color_dark: "#5A2D1D"
+
+  web: true
+  fullscreen: false

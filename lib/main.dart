@@ -8,7 +8,7 @@ import 'bible/bible_repository.dart';
 import 'motion.dart';
 import 'notes/note_store.dart';
 import 'notes/settings_store.dart';
-import 'screens/notes_list_screen.dart';
+import 'screens/splash_screen.dart';
 import 'theme.dart';
 
 Future<void> main() async {
@@ -19,7 +19,7 @@ Future<void> main() async {
   await settings.init();
   await notes.init();
   runApp(BibleNotesApp(notes: notes, bibles: bibles, settings: settings));
-  // Parse the Bible files in the background; the UI updates when ready.
+  // Parse the Bible files in the background; SplashScreen waits for it to finish.
   unawaited(bibles.load());
 }
 
@@ -59,7 +59,7 @@ class BibleNotesApp extends StatelessWidget {
           GlobalWidgetsLocalizations.delegate,
           FlutterQuillLocalizations.delegate,
         ],
-        home: NotesListScreen(notes: notes, bibles: bibles, settings: settings),
+        home: SplashScreen(notes: notes, bibles: bibles, settings: settings),
       ),
     );
   }

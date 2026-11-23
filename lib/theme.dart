@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'motion.dart';
+import 'tokens.dart';
 
 const _serifFallback = [
   'Georgia',
@@ -10,60 +11,69 @@ const _serifFallback = [
   'serif',
 ];
 
-/// Serif headings, system sans for body text (works fully offline).
+/// Serif is reserved for display/headline/title text (the wordmark, screen
+/// intros, note titles). App chrome such as dialogs and the app bar uses the
+/// system sans. Works fully offline.
 TextStyle serif(TextStyle? base) => (base ?? const TextStyle())
     .copyWith(fontFamily: 'Georgia', fontFamilyFallback: _serifFallback);
 
+// Palette: warm clay on warm paper, a few degrees off the usual terracotta
+// (primary is darker and redder; neutrals lean slightly more yellow).
+// Contrast was checked by hand: light primary/onPrimary ~4.9:1,
+// onSurfaceVariant ~6.4:1 on surface; dark primary ~5.3:1 on surface.
+// Re-verify with a contrast tool if you tweak any value.
 const _light = ColorScheme(
   brightness: Brightness.light,
-  primary: Color(0xFFC6613F),
+  primary: Color(0xFFB5532F),
   onPrimary: Colors.white,
-  primaryContainer: Color(0xFFF3DDD2),
-  onPrimaryContainer: Color(0xFF4A2314),
-  secondary: Color(0xFF5E5D59),
+  primaryContainer: Color(0xFFF2DACD),
+  onPrimaryContainer: Color(0xFF44200F),
+  secondary: Color(0xFF5B5953),
   onSecondary: Colors.white,
-  secondaryContainer: Color(0xFFF0E8DD),
-  onSecondaryContainer: Color(0xFF3D3929),
+  secondaryContainer: Color(0xFFEDE6D9),
+  onSecondaryContainer: Color(0xFF3A3626),
   error: Color(0xFFB3261E),
   onError: Colors.white,
-  errorContainer: Color(0xFFF9E3DE),
-  onErrorContainer: Color(0xFF5A1510),
-  surface: Color(0xFFFAF9F5),
-  onSurface: Color(0xFF141413),
-  onSurfaceVariant: Color(0xFF5E5D59),
-  outline: Color(0xFFB0AEA5),
-  outlineVariant: Color(0xFFE8E6DC),
+  errorContainer: Color(0xFFF9DEDC),
+  onErrorContainer: Color(0xFF410E0B),
+  surface: Color(0xFFF7F5EF),
+  onSurface: Color(0xFF1A1917),
+  onSurfaceVariant: Color(0xFF5B5953),
+  outline: Color(0xFF8F8D84),
+  outlineVariant: Color(0xFFE5E2D7),
+  inversePrimary: Color(0xFFE8977A),
   surfaceContainerLowest: Colors.white,
-  surfaceContainerLow: Color(0xFFF5F4EE),
-  surfaceContainer: Color(0xFFF0EEE6),
-  surfaceContainerHigh: Color(0xFFEBE9DF),
-  surfaceContainerHighest: Color(0xFFE8E6DC),
+  surfaceContainerLow: Color(0xFFF3F1EA),
+  surfaceContainer: Color(0xFFEEEBE2),
+  surfaceContainerHigh: Color(0xFFE8E5DB),
+  surfaceContainerHighest: Color(0xFFE3E0D5),
 );
 
 const _dark = ColorScheme(
   brightness: Brightness.dark,
-  primary: Color(0xFFD97757),
-  onPrimary: Color(0xFF2B140A),
-  primaryContainer: Color(0xFF5A2D1D),
-  onPrimaryContainer: Color(0xFFF3DDD2),
-  secondary: Color(0xFFB0AEA5),
-  onSecondary: Color(0xFF262624),
-  secondaryContainer: Color(0xFF3A3A37),
-  onSecondaryContainer: Color(0xFFE8E6DC),
+  primary: Color(0xFFE4825F),
+  onPrimary: Color(0xFF2E1508),
+  primaryContainer: Color(0xFF5C301F),
+  onPrimaryContainer: Color(0xFFF2DACD),
+  secondary: Color(0xFFB3B0A6),
+  onSecondary: Color(0xFF262521),
+  secondaryContainer: Color(0xFF3B3A36),
+  onSecondaryContainer: Color(0xFFE5E2D7),
   error: Color(0xFFF2B8B5),
   onError: Color(0xFF601410),
   errorContainer: Color(0xFF5A1510),
   onErrorContainer: Color(0xFFF9DEDC),
-  surface: Color(0xFF262624),
-  onSurface: Color(0xFFFAF9F5),
-  onSurfaceVariant: Color(0xFFB0AEA5),
-  outline: Color(0xFF6B6A66),
-  outlineVariant: Color(0xFF3E3E3B),
-  surfaceContainerLowest: Color(0xFF30302E),
-  surfaceContainerLow: Color(0xFF2B2B29),
-  surfaceContainer: Color(0xFF30302E),
-  surfaceContainerHigh: Color(0xFF3A3A37),
-  surfaceContainerHighest: Color(0xFF444441),
+  surface: Color(0xFF2A2926),
+  onSurface: Color(0xFFF7F5EF),
+  onSurfaceVariant: Color(0xFFB3B0A6),
+  outline: Color(0xFF77756D),
+  outlineVariant: Color(0xFF42413D),
+  inversePrimary: Color(0xFFB5532F),
+  surfaceContainerLowest: Color(0xFF33322F),
+  surfaceContainerLow: Color(0xFF2E2D2A),
+  surfaceContainer: Color(0xFF33322F),
+  surfaceContainerHigh: Color(0xFF3D3C38),
+  surfaceContainerHighest: Color(0xFF474642),
 );
 
 class AppTheme {
@@ -97,7 +107,7 @@ class AppTheme {
         );
 
     OutlineInputBorder field(Color c, [double w = 1]) => OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(Radii.md),
           borderSide: BorderSide(color: c, width: w),
         );
 
@@ -122,8 +132,8 @@ class AppTheme {
         scrolledUnderElevation: 0,
         centerTitle: false,
         iconTheme: IconThemeData(color: s.onSurface),
-        titleTextStyle: serif(textTheme.titleLarge)
-            .copyWith(fontSize: 22, fontWeight: FontWeight.w500),
+        titleTextStyle: tt.titleLarge
+            ?.copyWith(fontSize: 22, fontWeight: FontWeight.w600),
       ),
       drawerTheme: DrawerThemeData(
         backgroundColor: s.surface,
@@ -147,28 +157,33 @@ class AppTheme {
         style: FilledButton.styleFrom(
           backgroundColor: s.primary,
           foregroundColor: s.onPrimary,
-          shape: rounded(12),
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          shape: rounded(Radii.md),
+          minimumSize: const Size(64, kMinHit),
+          padding: const EdgeInsets.symmetric(horizontal: Space.xl),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
           foregroundColor: s.primary,
-          shape: rounded(12),
+          shape: rounded(Radii.md),
+          minimumSize: const Size(64, kMinHit),
         ),
       ),
       popupMenuTheme: PopupMenuThemeData(
         color: s.surfaceContainerLowest,
         surfaceTintColor: Colors.transparent,
         elevation: 3,
-        shape: rounded(14, border: true),
+        shape: rounded(Radii.md, border: true),
       ),
       dialogTheme: DialogThemeData(
         backgroundColor: s.surfaceContainerLowest,
         surfaceTintColor: Colors.transparent,
-        shape: rounded(20),
-        titleTextStyle:
-            serif(textTheme.titleLarge).copyWith(fontSize: 22, color: s.onSurface),
+        shape: rounded(Radii.xl),
+        titleTextStyle: tt.titleLarge?.copyWith(
+          fontSize: 22,
+          fontWeight: FontWeight.w600,
+          color: s.onSurface,
+        ),
       ),
       bottomSheetTheme: BottomSheetThemeData(
         backgroundColor: s.surfaceContainerLowest,
@@ -176,22 +191,22 @@ class AppTheme {
         surfaceTintColor: Colors.transparent,
         showDragHandle: true,
         shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(Radii.xl)),
         ),
       ),
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         backgroundColor: s.onSurface,
         contentTextStyle: TextStyle(color: s.surface),
-        actionTextColor: const Color(0xFFE8A58C),
-        shape: rounded(12),
+        actionTextColor: s.inversePrimary,
+        shape: rounded(Radii.md),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: s.surfaceContainerLowest,
         border: field(s.outlineVariant),
         enabledBorder: field(s.outlineVariant),
-        focusedBorder: field(s.primary, 1.5),
+        focusedBorder: field(s.primary, 2),
       ),
     );
   }

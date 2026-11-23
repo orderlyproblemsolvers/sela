@@ -1,26 +1,32 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_quill/flutter_quill.dart';
 import 'package:flutter_quill/quill_delta.dart';
 
+import '../app_icons.dart';
 import '../bible/bible_repository.dart';
 import '../bible/verse_ref.dart';
 import '../motion.dart';
 import '../notes/note.dart';
+import '../notes/note_io.dart';
 import '../notes/note_store.dart';
 import '../notes/settings_store.dart';
+import '../tokens.dart';
 import '../widgets/verse_embed.dart';
 
-/// Quill shows every embed as this character in plain text.
 const String _obj = '\uFFFC';
-
-/// Typing one of these right after a reference (e.g. "James 2:1 ")
-/// triggers the verse lookup.
 const Set<String> _triggers = {' ', '\u00A0', ',', '.', ';', '!', '?', ')'};
 
-/// A stretch of note text that is scripture.
+/// Widest the writing column grows, so lines stay readable on tablets/desktop.
+const double _maxEditorWidth = 720;
+
+String _slug(String s) =>
+    s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_');
+
 class _VerseRun {
   _VerseRun(this.start, this.end, this.link);
 
@@ -48,6 +54,28 @@ class NoteEditorScreen extends StatefulWidget {
 }
 
 class _NoteEditorScreenState extends State<NoteEditorScreen> {
+  // Mid-tone text colours that stay readable (about 3:1 or better) on both
+  // the light and dark surfaces. Existing notes keep whatever hex they stored.
+  static const _textColors = <(String, String, Color)>[
+    ('Teal', '#3F8F8A', Color(0xFF3F8F8A)),
+    ('Crimson', '#C0392B', Color(0xFFC0392B)),
+    ('Ochre', '#B7791F', Color(0xFFB7791F)),
+    ('Forest', '#2E7D32', Color(0xFF2E7D32)),
+    ('Ocean', '#1D6FA5', Color(0xFF1D6FA5)),
+    ('Plum', '#7B3FA0', Color(0xFF7B3FA0)),
+    ('Muted', '#7C8583', Color(0xFF7C8583)),
+  ];
+
+  static const _highlightColors = <(String, String, Color)>[
+    ('Yellow', '#FEF08A', Color(0xFFFEF08A)),
+    ('Peach', '#FED7AA', Color(0xFFFED7AA)),
+    ('Rose', '#FECDD3', Color(0xFFFECDD3)),
+    ('Mint', '#BBF7D0', Color(0xFFBBF7D0)),
+    ('Sky', '#BAE6FD', Color(0xFFBAE6FD)),
+    ('Lavender', '#E9D5FF', Color(0xFFE9D5FF)),
+    ('Stone', '#DCE1DF', Color(0xFFDCE1DF)),
+  ];
+
   late final QuillController _controller;
   late final StreamSubscription<DocChange> _sub;
   late final TextEditingController _titleCtl;
@@ -56,7 +84,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
   Timer? _debounce;
   bool _dirty = false;
 
-  /// Our own edits fire document events too; ignore them briefly.
+  /// Controls the parallel translation comparison panel in the verse bar.
+  bool _comparing = false;
+  String? _compareVersionId;
+
   DateTime _suppressUntil = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
@@ -99,6 +130,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   void _onDocChange(DocChange event) {
     _markDirty();
+    if (_maybeApplyMarkdownShortcut(event)) return;
     _maybeEmbedVerse(event);
   }
 
@@ -119,7 +151,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final plain =
         _controller.document.toPlainText().replaceAll(_obj, '').trim();
     final isNew = !widget.notes.contains(widget.note.id);
-    if (plain.isEmpty && title.isEmpty && isNew) return; // don't save empty
+    if (plain.isEmpty && title.isEmpty && isNew) return;
 
     String clip(String s, int n) => s.length <= n ? s : '${s.substring(0, n)}…';
 
@@ -129,10 +161,10 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     note.preview = clip(plain.replaceAll(RegExp(r'\n{2,}'), '\n'), 280);
     note.delta = _controller.document.toDelta().toJson();
     note.updatedAt = DateTime.now();
+    note.refreshTags();
     await widget.notes.save(note);
   }
 
-  /// Archive / delete from inside the editor.
   Future<void> _onMenu(String action) async {
     _debounce?.cancel();
     await _save();
@@ -143,8 +175,30 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     final messenger = ScaffoldMessenger.of(context);
     final nav = Navigator.of(context);
 
+    if (action == 'export_md') {
+      await NoteIO.saveOrShareFile(
+        context: context,
+        fileName: '${_slug(note.displayTitle)}.md',
+        bytes: Uint8List.fromList(utf8.encode(NoteIO.toMarkdown(note))),
+        mimeType: 'text/markdown',
+      );
+      return;
+    }
+
+    if (action == 'export_pdf') {
+      final pdfBytes = await NoteIO.toPdfBytes(note);
+      if (!mounted) return;
+      await NoteIO.saveOrShareFile(
+        context: context,
+        fileName: '${_slug(note.displayTitle)}.pdf',
+        bytes: pdfBytes,
+        mimeType: 'application/pdf',
+      );
+      return;
+    }
+
     if (!notes.contains(note.id)) {
-      nav.pop(); // never saved (empty), nothing to archive or delete
+      nav.pop();
       return;
     }
 
@@ -161,7 +215,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             onPressed: () => notes.setArchived([note], was),
           ),
         ));
-    } else {
+    } else if (action == 'trash') {
       await notes.trash([note]);
       nav.pop();
       messenger
@@ -176,9 +230,151 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     }
   }
 
+  // --------------------------------------------------- preset color picker
+
+  Future<void> _pickFormatColor({required bool isBackground}) async {
+    final tt = Theme.of(context).textTheme;
+    final palette = isBackground ? _highlightColors : _textColors;
+    final attrKey = isBackground ? 'background' : 'color';
+    final current = (_controller.getSelectionStyle().attributes[attrKey]?.value
+            as String?)
+        ?.toLowerCase();
+
+    final picked = await showModalBottomSheet<String?>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+              Space.lg, Space.xs, Space.lg, Space.xl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                isBackground ? 'Highlight color' : 'Text color',
+                style: tt.titleLarge,
+              ),
+              const SizedBox(height: Space.lg),
+              Wrap(
+                spacing: Space.md,
+                runSpacing: Space.md,
+                children: [
+                  _Swatch(
+                    label: isBackground ? 'No highlight' : 'Default text',
+                    selected: current == null,
+                    onTap: () => Navigator.pop(ctx, ''),
+                  ),
+                  for (final (label, hex, color) in palette)
+                    _Swatch(
+                      label: label,
+                      color: color,
+                      selected: current == hex.toLowerCase(),
+                      onTap: () => Navigator.pop(ctx, hex),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (picked == null || !mounted) return;
+    final attr =
+        Attribute.fromKeyValue(attrKey, picked.isEmpty ? null : picked);
+    _controller.formatSelection(attr);
+  }
+
+  // --------------------------------------------------- markdown shortcuts
+
+  bool _maybeApplyMarkdownShortcut(DocChange event) {
+    if (DateTime.now().isBefore(_suppressUntil)) return false;
+    final ins = _firstTextInsert(event.change);
+    if (ins == null) return false;
+    final (pos, typed) = ins;
+    if (typed != ' ') return false;
+
+    final plain = _controller.document.toPlainText();
+    if (pos <= 0 || pos >= plain.length) return false;
+
+    final lineStart = plain.lastIndexOf('\n', pos - 1) + 1;
+    final linePrefix = plain.substring(lineStart, pos);
+
+    // Block-level Markdown shortcuts at the start of a line
+    Attribute? blockAttr;
+    switch (linePrefix) {
+      case '#':
+        blockAttr = Attribute.h1;
+      case '##':
+        blockAttr = Attribute.h2;
+      case '###':
+        blockAttr = Attribute.h3;
+      case '-':
+      case '*':
+        blockAttr = Attribute.ul;
+      case '1.':
+        blockAttr = Attribute.ol;
+      case '[]':
+      case '[ ]':
+        blockAttr = Attribute.unchecked;
+      case '[x]':
+      case '[X]':
+        blockAttr = Attribute.checked;
+      case '>':
+        blockAttr = Attribute.blockQuote;
+    }
+
+    if (blockAttr != null) {
+      _suppressUntil = DateTime.now().add(const Duration(milliseconds: 200));
+      final removeLen = (pos - lineStart) + 1; // prefix + space
+      _controller.replaceText(
+        lineStart,
+        removeLen,
+        '',
+        TextSelection.collapsed(offset: lineStart),
+      );
+      _controller.formatText(lineStart, 0, blockAttr);
+      return true;
+    }
+
+    // Inline Markdown shortcuts: **bold** or *italic* followed by space
+    final boldMatch = RegExp(r'\*\*(.+?)\*\*$').firstMatch(linePrefix);
+    if (boldMatch != null) {
+      final inner = boldMatch.group(1)!;
+      final matchStart = lineStart + boldMatch.start;
+      final matchLen = boldMatch.group(0)!.length;
+      _suppressUntil = DateTime.now().add(const Duration(milliseconds: 200));
+      _controller.replaceText(
+        matchStart,
+        matchLen,
+        inner,
+        TextSelection.collapsed(offset: matchStart + inner.length + 1),
+      );
+      _controller.formatText(matchStart, inner.length, Attribute.bold);
+      return true;
+    }
+
+    final italicMatch = RegExp(r'(?<!\*)\*([^*]+?)\*$').firstMatch(linePrefix);
+    if (italicMatch != null) {
+      final inner = italicMatch.group(1)!;
+      final matchStart = lineStart + italicMatch.start;
+      final matchLen = italicMatch.group(0)!.length;
+      _suppressUntil = DateTime.now().add(const Duration(milliseconds: 200));
+      _controller.replaceText(
+        matchStart,
+        matchLen,
+        inner,
+        TextSelection.collapsed(offset: matchStart + inner.length + 1),
+      );
+      _controller.formatText(matchStart, inner.length, Attribute.italic);
+      return true;
+    }
+
+    return false;
+  }
+
   // ------------------------------------------------------- verse text/runs
 
-  /// What gets written into the note for [ref].
   String _verseText(BibleVersion? bible, VerseRef ref, bool open) {
     if (!open || bible == null) return ref.label;
     final multi = ref.verseEnd > ref.verseStart;
@@ -191,7 +387,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     return '“${parts.join(' ')}” (${ref.label})';
   }
 
-  /// All scripture runs in the note, found from the document's delta.
   List<_VerseRun> _verseRuns() {
     final out = <_VerseRun>[];
     var off = 0;
@@ -231,8 +426,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     return null;
   }
 
-  /// Replaces [len] characters at [start] with the verse text and marks it as
-  /// scripture. Returns the length of the text written.
   int _writeVerse(
     VerseRef ref,
     bool open,
@@ -257,9 +450,6 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     return text.length;
   }
 
-  // --------------------------------------------------- auto verse detection
-
-  /// First plain-text insertion in [change] as (position, text).
   (int, String)? _firstTextInsert(Delta change) {
     var pos = 0;
     for (final op in change.toList()) {
@@ -268,7 +458,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
       } else if (op.isInsert) {
         final d = op.data;
         if (d is String) return (pos, d);
-        pos += 1; // an embed
+        pos += 1;
       }
     }
     return null;
@@ -286,7 +476,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (!_triggers.contains(lastChar)) return;
 
     final bible = widget.bibles.version(null);
-    if (bible == null) return; // no Bible loaded yet
+    if (bible == null) return;
 
     final t = _controller.document.toPlainText();
     final lastIdx = pos + typed.length - 1;
@@ -297,18 +487,14 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (hit == null) return;
     final (parsed, relStart) = hit;
     if (bible.verse(parsed.book, parsed.chapter, parsed.verseStart) == null) {
-      return; // not a real verse in the loaded Bible
+      return;
     }
 
     final refStart = lineStart + relStart;
-
-    // Don't convert text that is already inside a verse.
     for (final r in _verseRuns()) {
       if (r.start < lastIdx && r.end > refStart) return;
     }
 
-    // Replace the typed reference with the scripture; keep the typed
-    // space/punctuation after it and put the cursor after that.
     _writeVerse(
       parsed.withVersion(bible.id),
       widget.settings.insertExpanded,
@@ -352,7 +538,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              padding:
+                  const EdgeInsets.fromLTRB(Space.lg, 0, Space.lg, Space.sm),
               child: Text(
                 'Show ${run.link.ref.label} in…',
                 style: Theme.of(ctx).textTheme.titleLarge,
@@ -365,7 +552,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                   for (final id in ids)
                     ListTile(
                       title: Text(id),
-                      trailing: id == current ? const Icon(Icons.check) : null,
+                      trailing:
+                          id == current ? const Icon(AppIcons.check) : null,
                       onTap: () => Navigator.pop(ctx, id),
                     ),
                 ],
@@ -380,8 +568,8 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _rewrite(_runAtSelection() ?? run, version: picked);
   }
 
-  /// The bar slides/fades in like a sheet (critically-damped spring), and
-  /// its icons morph instead of snapping.
+  /// The bar changes the editor's height, so it eases without overshoot;
+  /// a bouncing layout would make the text jitter.
   Widget _verseBar(ColorScheme cs) {
     return ListenableBuilder(
       listenable: _controller,
@@ -389,133 +577,154 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
         final reduce = Motion.reduced(context);
         final run = _runAtSelection();
         return AnimatedSwitcher(
-          duration: Duration(milliseconds: reduce ? 120 : 420),
-          reverseDuration: Duration(milliseconds: reduce ? 100 : 260),
-          switchInCurve: const SpringCurve(),
+          duration: reduce ? const Duration(milliseconds: 100) : Dur.base,
+          reverseDuration: reduce ? const Duration(milliseconds: 100) : Dur.fast,
+          switchInCurve: Curves.easeOutCubic,
           switchOutCurve: Curves.easeInCubic,
           transitionBuilder: (child, a) => reduce
               ? FadeTransition(opacity: a, child: child)
               : ClipRect(
                   child: SizeTransition(
                     sizeFactor: a,
-                    axisAlignment: -1,
+                    alignment: Alignment.topCenter,
                     child: FadeTransition(opacity: a, child: child),
                   ),
                 ),
           child: run == null
               ? const SizedBox.shrink(key: ValueKey('no-verse'))
-              : _verseBarBody(cs, run, reduce),
+              : _verseBarBody(cs, run),
         );
       },
     );
   }
 
-  Widget _morph(bool reduce, Widget icon) => AnimatedSwitcher(
-        duration: Duration(milliseconds: reduce ? 80 : 260),
-        switchInCurve: const SpringCurve(duration: Duration(milliseconds: 260)),
-        transitionBuilder: (c, a) => reduce
-            ? FadeTransition(opacity: a, child: c)
-            : RotationTransition(
-                turns: Tween<double>(begin: 0.12, end: 0).animate(a),
-                child: ScaleTransition(
-                  scale: a,
-                  child: FadeTransition(opacity: a, child: c),
-                ),
-              ),
+  /// Icon swap for toggles (expand/collapse, pin): a quick crossfade only.
+  Widget _swap(Widget icon) => AnimatedSwitcher(
+        duration: Dur.fast,
         child: icon,
       );
 
-  Widget _verseBarBody(ColorScheme cs, _VerseRun run, bool reduce) {
+  Widget _verseBarBody(ColorScheme cs, _VerseRun run) {
     final ref = run.link.ref;
+    final ids = widget.bibles.versionIds;
     final version = ref.version ?? widget.bibles.selectedId ?? '';
-    final canSwitch = widget.bibles.versionIds.length > 1;
+    final canSwitch = ids.length > 1;
+
+    // Default secondary version for parallel comparison
+    final altId = (_compareVersionId != null &&
+            ids.contains(_compareVersionId) &&
+            _compareVersionId != version)
+        ? _compareVersionId!
+        : ids.firstWhere((id) => id != version,
+            orElse: () => ids.isNotEmpty ? ids.first : '');
 
     return Material(
       key: const ValueKey('verse-bar'),
       color: cs.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.only(left: 20, right: 4),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                version.isEmpty ? ref.label : '${ref.label}  ·  $version',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  color: cs.onSecondaryContainer,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: Space.lg, right: Space.xs),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    version.isEmpty ? ref.label : '${ref.label}  ·  $version',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: cs.onSecondaryContainer,
+                    ),
+                  ),
+                ),
+                if (canSwitch) ...[
+                  IconButton(
+                    tooltip: 'Parallel comparison',
+                    isSelected: _comparing,
+                    icon: const Icon(AppIcons.compare),
+                    selectedIcon:
+                        Icon(AppIcons.compare, color: cs.onPrimary),
+                    style: IconButton.styleFrom(
+                      backgroundColor: _comparing ? cs.primary : null,
+                    ),
+                    onPressed: () => setState(() {
+                      _comparing = !_comparing;
+                      _compareVersionId = altId;
+                    }),
+                  ),
+                  IconButton(
+                    tooltip: 'Change translation',
+                    icon: const Icon(AppIcons.translate),
+                    onPressed: () => _pickVersion(run),
+                  ),
+                ],
+                IconButton(
+                  tooltip: run.link.open ? 'Collapse verse' : 'Expand verse',
+                  icon: _swap(
+                    Icon(
+                      run.link.open
+                          ? AppIcons.unfoldLess
+                          : AppIcons.unfoldMore,
+                      key: ValueKey(run.link.open),
+                    ),
+                  ),
+                  onPressed: () => _rewrite(run, open: !run.link.open),
+                ),
+                IconButton(
+                  tooltip: 'Remove verse styling (keep text)',
+                  icon: const Icon(AppIcons.linkOff),
+                  onPressed: () => _unlink(run),
+                ),
+              ],
+            ),
+          ),
+          if (_comparing && canSwitch)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(
+                  Space.lg, Space.sm, Space.lg, Space.md),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerLow,
+                border: Border(top: BorderSide(color: cs.outlineVariant)),
+              ),
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: _ParallelPane(
+                        versionId: version,
+                        text: _verseText(
+                            widget.bibles.version(version), ref, true),
+                      ),
+                    ),
+                    VerticalDivider(width: Space.xl, color: cs.outlineVariant),
+                    Expanded(
+                      child: _ParallelPane(
+                        versionId: altId,
+                        text: _verseText(
+                            widget.bibles.version(altId), ref, true),
+                        availableIds:
+                            ids.where((id) => id != version).toList(),
+                        onChanged: (v) =>
+                            setState(() => _compareVersionId = v),
+                        onUseVersion: () => _rewrite(run, version: altId),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
-            if (canSwitch)
-              IconButton(
-                tooltip: 'Change translation',
-                icon: const Icon(Icons.translate),
-                onPressed: () => _pickVersion(run),
-              ),
-            IconButton(
-              tooltip: run.link.open ? 'Collapse verse' : 'Expand verse',
-              icon: _morph(
-                reduce,
-                Icon(
-                  run.link.open ? Icons.unfold_less : Icons.unfold_more,
-                  key: ValueKey(run.link.open),
-                ),
-              ),
-              onPressed: () => _rewrite(run, open: !run.link.open),
-            ),
-            IconButton(
-              tooltip: 'Remove verse styling (keep text)',
-              icon: const Icon(Icons.link_off),
-              onPressed: () => _unlink(run),
-            ),
-          ],
-        ),
+        ],
       ),
     );
   }
 
-  // ------------------------------------------------------- manual insertion
+  // -------------------------------------- manual insertion & verse finder
 
-  Future<void> _promptInsertVerse() async {
-    final bible = widget.bibles.version(null);
-    if (bible == null) {
-      _toast('No Bible loaded. Add XML files to assets/bibles/.');
-      return;
-    }
-    final input = TextEditingController();
-    final text = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Insert verse'),
-        content: TextField(
-          controller: input,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: 'e.g. James 2:1  or  John 3:16-18',
-          ),
-          onSubmitted: (v) => Navigator.pop(ctx, v),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, input.text),
-              child: const Text('Insert')),
-        ],
-      ),
-    );
-    if (text == null || text.trim().isEmpty) return;
-
-    final parsed = parseReference(text.trim());
-    if (parsed == null ||
-        bible.verse(parsed.book, parsed.chapter, parsed.verseStart) == null) {
-      _toast('Couldn’t find “${text.trim()}” in ${bible.id}.');
-      return;
-    }
-
+  void _insertVerseRefAtCursor(VerseRef ref) {
     final maxIdx = _controller.document.length - 1;
     final sel = _controller.selection;
     var start = sel.isValid ? sel.start : maxIdx;
@@ -524,14 +733,13 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     if (start + len > maxIdx) len = maxIdx - start;
 
     final n = _writeVerse(
-      parsed.withVersion(bible.id),
+      ref,
       widget.settings.insertExpanded,
       start,
       len,
       (n) => start + n,
     );
 
-    // A plain space after the verse so typing continues as normal text.
     _controller.replaceText(
       start + n,
       0,
@@ -542,6 +750,25 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
     _focus.requestFocus();
   }
 
+  Future<void> _promptInsertVerse() async {
+    final bible = widget.bibles.version(null);
+    if (bible == null) {
+      _toast(kDebugMode
+          ? 'No Bible loaded. Add XML files to assets/bibles/.'
+          : 'No Bible is available.');
+      return;
+    }
+
+    final picked = await showModalBottomSheet<VerseRef>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => _VerseFinderSheet(bible: bible),
+    );
+
+    if (picked == null || !mounted) return;
+    _insertVerseRefAtCursor(picked.withVersion(bible.id));
+  }
+
   void _toast(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -549,13 +776,29 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
 
   // ------------------------------------------------------------------- UI
 
+  PopupMenuItem<String> _menuItem(
+    String value,
+    IconData icon,
+    String label, {
+    Color? color,
+  }) =>
+      PopupMenuItem(
+        value: value,
+        child: Row(
+          children: [
+            Icon(icon, size: 20, color: color),
+            const SizedBox(width: Space.md),
+            Text(label, style: TextStyle(color: color)),
+          ],
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final tt = Theme.of(context).textTheme;
     final isNew = widget.note.title.isEmpty && widget.note.delta.isEmpty;
 
-    // Apply the user's text-size setting on top of the system one.
     final media = MediaQuery.of(context);
     final scaler = TextScaler.linear(
         media.textScaler.scale(1.0) * widget.settings.editorScale);
@@ -580,17 +823,29 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     for (final id in ids)
                       PopupMenuItem(value: id, child: Text(id)),
                   ],
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: cs.outlineVariant),
-                    ),
-                    child: Text(
-                      '${widget.bibles.selectedId ?? ''} ▾',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: kMinHit),
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.only(
+                            left: Space.md, right: Space.xs),
+                        height: 36,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(color: cs.outlineVariant),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              widget.bibles.selectedId ?? '',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            const Icon(Icons.arrow_drop_down, size: 20),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 );
@@ -598,10 +853,9 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
             ),
             IconButton(
               tooltip: widget.note.pinned ? 'Unpin' : 'Pin',
-              icon: _morph(
-                Motion.reduced(context),
+              icon: _swap(
                 Icon(
-                  widget.note.pinned ? Icons.push_pin : Icons.push_pin_outlined,
+                  widget.note.pinned ? AppIcons.pin : AppIcons.unpin,
                   key: ValueKey(widget.note.pinned),
                   color: widget.note.pinned ? cs.primary : null,
                 ),
@@ -609,100 +863,103 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
               onPressed: _togglePin,
             ),
             IconButton(
-              tooltip: 'Insert verse',
-              icon: const Icon(Icons.menu_book_outlined),
+              tooltip: 'Insert or find verse',
+              icon: const Icon(AppIcons.bible),
               onPressed: _promptInsertVerse,
             ),
             PopupMenuButton<String>(
               tooltip: 'More',
               onSelected: _onMenu,
               itemBuilder: (_) => [
-                PopupMenuItem(
-                  value: 'archive',
-                  child: Row(
-                    children: [
-                      Icon(
-                          widget.note.archived
-                              ? Icons.unarchive_outlined
-                              : Icons.archive_outlined,
-                          size: 18),
-                      const SizedBox(width: 10),
-                      Text(widget.note.archived ? 'Unarchive' : 'Archive'),
-                    ],
-                  ),
+                _menuItem(
+                    'export_md', AppIcons.exportMarkdown, 'Export Markdown (.md)'),
+                _menuItem(
+                    'export_pdf', AppIcons.exportPdf, 'Export PDF (.pdf)'),
+                const PopupMenuDivider(),
+                _menuItem(
+                  'archive',
+                  widget.note.archived ? AppIcons.unarchive : AppIcons.archive,
+                  widget.note.archived ? 'Unarchive' : 'Archive',
                 ),
-                PopupMenuItem(
-                  value: 'trash',
-                  child: Row(
-                    children: [
-                      Icon(Icons.delete_outline, size: 18, color: cs.error),
-                      const SizedBox(width: 10),
-                      Text('Delete', style: TextStyle(color: cs.error)),
-                    ],
-                  ),
-                ),
+                _menuItem('trash', AppIcons.trash, 'Delete', color: cs.error),
               ],
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: Space.xs),
           ],
         ),
         body: SafeArea(
           child: Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
-                child: TextField(
-                  controller: _titleCtl,
-                  autofocus: isNew,
-                  textCapitalization: TextCapitalization.sentences,
-                  textInputAction: TextInputAction.next,
-                  onChanged: (_) => _markDirty(),
-                  onSubmitted: (_) => _focus.requestFocus(),
-                  maxLines: null,
-                  style: tt.headlineMedium?.copyWith(
-                    fontWeight: FontWeight.w500,
-                    height: 1.2,
-                  ),
-                  decoration: InputDecoration(
-                    hintText: 'Title',
-                    hintStyle: tt.headlineMedium?.copyWith(
-                      fontWeight: FontWeight.w500,
-                      color: cs.outline,
-                    ),
-                    filled: false,
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                  ),
-                ),
-              ),
               Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  child: MediaQuery(
-                    data: media.copyWith(textScaler: scaler),
-                    child: QuillEditor.basic(
-                      controller: _controller,
-                      focusNode: _focus,
-                      scrollController: _scroll,
-                      config: QuillEditorConfig(
-                        placeholder:
-                            'Start typing…  try “just like in James 2:1 ”',
-                        padding: const EdgeInsets.only(top: 8, bottom: 80),
-                        // Scripture = text with a "verse:" link: same colour
-                        // as your text, dotted underline.
-                        customStyles: DefaultStyles(
-                          link: TextStyle(
-                            decoration: TextDecoration.underline,
-                            decorationStyle: TextDecorationStyle.dotted,
-                            decorationColor: cs.primary,
-                            decorationThickness: 1.5,
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: ConstrainedBox(
+                    constraints:
+                        const BoxConstraints(maxWidth: _maxEditorWidth),
+                    child: Column(
+                      children: [
+                        Padding(
+                          padding:
+                              const EdgeInsets.symmetric(horizontal: Space.lg),
+                          child: TextField(
+                            controller: _titleCtl,
+                            autofocus: isNew,
+                            textCapitalization: TextCapitalization.sentences,
+                            textInputAction: TextInputAction.next,
+                            onChanged: (_) => _markDirty(),
+                            onSubmitted: (_) => _focus.requestFocus(),
+                            maxLines: null,
+                            style: tt.headlineMedium?.copyWith(
+                              fontWeight: FontWeight.w500,
+                              height: 1.2,
+                            ),
+                            decoration: InputDecoration(
+                              hintText: 'Title',
+                              hintStyle: tt.headlineMedium?.copyWith(
+                                fontWeight: FontWeight.w500,
+                                color: cs.outline,
+                              ),
+                              filled: false,
+                              border: InputBorder.none,
+                              enabledBorder: InputBorder.none,
+                              focusedBorder: InputBorder.none,
+                              contentPadding: const EdgeInsets.symmetric(
+                                  vertical: Space.sm),
+                            ),
                           ),
                         ),
-                        onLaunchUrl: (_) {}, // verse links aren't web links
-                        embedBuilders: [VerseEmbedBuilder()],
-                      ),
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: Space.lg),
+                            child: MediaQuery(
+                              data: media.copyWith(textScaler: scaler),
+                              child: QuillEditor.basic(
+                                controller: _controller,
+                                focusNode: _focus,
+                                scrollController: _scroll,
+                                config: QuillEditorConfig(
+                                  placeholder:
+                                      'Start writing. Type a reference like “James 2:1” to insert the verse.',
+                                  padding: const EdgeInsets.only(
+                                      top: Space.sm, bottom: 80),
+                                  customStyles: DefaultStyles(
+                                    link: TextStyle(
+                                      decoration: TextDecoration.underline,
+                                      decorationStyle:
+                                          TextDecorationStyle.dotted,
+                                      decorationColor: cs.primary,
+                                      decorationThickness: 1.5,
+                                    ),
+                                  ),
+                                  onLaunchUrl: (_) {},
+                                  embedBuilders: [VerseEmbedBuilder()],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -714,7 +971,7 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                 ),
                 child: QuillSimpleToolbar(
                   controller: _controller,
-                  config: const QuillSimpleToolbarConfig(
+                  config: QuillSimpleToolbarConfig(
                     multiRowsDisplay: false,
                     showFontFamily: false,
                     showSearchButton: false,
@@ -724,8 +981,305 @@ class _NoteEditorScreenState extends State<NoteEditorScreen> {
                     showCodeBlock: false,
                     showSmallButton: false,
                     showLink: false,
+                    showColorButton: false,
+                    showBackgroundColorButton: false,
+                    showListCheck: true,
+                    customButtons: [
+                      QuillToolbarCustomButtonOptions(
+                        icon: const Icon(Icons.format_color_text, size: 20),
+                        tooltip: 'Text color',
+                        onPressed: () => _pickFormatColor(isBackground: false),
+                      ),
+                      QuillToolbarCustomButtonOptions(
+                        icon: const Icon(Icons.format_color_fill, size: 20),
+                        tooltip: 'Highlight color',
+                        onPressed: () => _pickFormatColor(isBackground: true),
+                      ),
+                    ],
                   ),
                 ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A colour choice in the picker. A null [color] is the "none/default" chip.
+/// 48px target, labelled for screen readers, with a checkmark on the current
+/// choice so selection isn't conveyed by colour alone.
+class _Swatch extends StatelessWidget {
+  const _Swatch({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.color,
+  });
+
+  final String label;
+  final Color? color;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final fill = color ?? cs.surfaceContainerLowest;
+    final onFill = ThemeData.estimateBrightnessForColor(fill) == Brightness.light
+        ? Colors.black
+        : Colors.white;
+
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: label,
+      child: Tooltip(
+        message: label,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: Container(
+            width: kMinHit,
+            height: kMinHit,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: fill,
+              border: Border.all(
+                color: selected ? cs.primary : cs.outlineVariant,
+                width: selected ? 2 : 1,
+              ),
+            ),
+            child: selected
+                ? Icon(AppIcons.check, size: 20, color: onFill)
+                : (color == null
+                    ? Icon(AppIcons.close,
+                        size: 20, color: cs.onSurfaceVariant)
+                    : null),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ParallelPane extends StatelessWidget {
+  const _ParallelPane({
+    required this.versionId,
+    required this.text,
+    this.availableIds,
+    this.onChanged,
+    this.onUseVersion,
+  });
+
+  final String versionId;
+  final String text;
+  final List<String>? availableIds;
+  final ValueChanged<String>? onChanged;
+  final VoidCallback? onUseVersion;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            if (availableIds != null && availableIds!.length > 1)
+              DropdownButton<String>(
+                value: versionId,
+                isDense: true,
+                underline: const SizedBox.shrink(),
+                style: tt.labelLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: cs.primary,
+                ),
+                items: [
+                  for (final id in availableIds!)
+                    DropdownMenuItem(value: id, child: Text(id)),
+                ],
+                onChanged: (v) {
+                  if (v != null && onChanged != null) onChanged!(v);
+                },
+              )
+            else
+              Text(
+                versionId,
+                style: tt.labelLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+            const Spacer(),
+            if (onUseVersion != null)
+              TextButton(
+                onPressed: onUseVersion,
+                child: const Text('Use'),
+              ),
+          ],
+        ),
+        const SizedBox(height: Space.xs),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 112),
+          child: SingleChildScrollView(
+            child: Text(
+              text,
+              style: tt.bodyMedium?.copyWith(height: 1.4, color: cs.onSurface),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _VerseFinderSheet extends StatefulWidget {
+  const _VerseFinderSheet({required this.bible});
+
+  final BibleVersion bible;
+
+  @override
+  State<_VerseFinderSheet> createState() => _VerseFinderSheetState();
+}
+
+class _VerseFinderSheetState extends State<_VerseFinderSheet> {
+  final _ctl = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
+  void _submitInput() {
+    final trimmed = _ctl.text.trim();
+    if (trimmed.isEmpty) return;
+    final parsed = parseReference(trimmed);
+    if (parsed != null &&
+        widget.bible.verse(parsed.book, parsed.chapter, parsed.verseStart) !=
+            null) {
+      Navigator.pop(context, parsed);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final parsed = parseReference(_query.trim());
+    final directText = parsed == null
+        ? null
+        : widget.bible.verse(parsed.book, parsed.chapter, parsed.verseStart);
+
+    final hits = _query.trim().length < 2
+        ? const <(VerseRef, String)>[]
+        : widget.bible.search(_query);
+
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.75,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                    Space.lg, Space.xs, Space.lg, Space.md),
+                child: Text(
+                  'Verse Finder (${widget.bible.id})',
+                  style: tt.titleLarge,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: Space.lg),
+                child: TextField(
+                  controller: _ctl,
+                  autofocus: true,
+                  onChanged: (v) => setState(() => _query = v),
+                  onSubmitted: (_) => _submitInput(),
+                  decoration: const InputDecoration(
+                    hintText:
+                        'Type a reference (John 3:16) or keywords (faith works)…',
+                    prefixIcon: Icon(AppIcons.search),
+                  ),
+                ),
+              ),
+              const SizedBox(height: Space.md),
+              if (parsed != null && directText != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: Space.md),
+                  child: Card(
+                    color: cs.primaryContainer,
+                    child: ListTile(
+                      title: Text(
+                        parsed.label,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: cs.onPrimaryContainer,
+                        ),
+                      ),
+                      subtitle: Text(
+                        directText,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: cs.onPrimaryContainer),
+                      ),
+                      trailing: Icon(AppIcons.addCircle,
+                          color: cs.onPrimaryContainer),
+                      onTap: () => Navigator.pop(context, parsed),
+                    ),
+                  ),
+                ),
+              Flexible(
+                child: hits.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.all(Space.xxl),
+                        child: Center(
+                          child: Text(
+                            _query.trim().length < 2
+                                ? 'Search any phrase or word when you can’t remember the exact reference.'
+                                : 'No matching verses found.',
+                            textAlign: TextAlign.center,
+                            style: tt.bodyMedium
+                                ?.copyWith(color: cs.onSurfaceVariant),
+                          ),
+                        ),
+                      )
+                    : ListView.separated(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.fromLTRB(
+                            Space.lg, Space.xs, Space.lg, Space.lg),
+                        itemCount: hits.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (ctx, i) {
+                          final (ref, verseText) = hits[i];
+                          return ListTile(
+                            title: Text(
+                              ref.label,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                            subtitle: Text(
+                              verseText,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            onTap: () => Navigator.pop(ctx, ref),
+                          );
+                        },
+                      ),
               ),
             ],
           ),
